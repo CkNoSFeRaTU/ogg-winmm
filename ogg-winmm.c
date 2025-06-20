@@ -673,13 +673,13 @@ MCIERROR WINAPI fake_mciSendStringA(LPCSTR cmd, LPSTR ret, UINT cchReturn, HANDL
 		{
 			sprintf(alias_s, "%s", tmp_s+1);
 		}
-		fake_mciSendCommandA(MAGIC_DEVICEID, MCI_OPEN, 0, (DWORD_PTR)NULL);
+		// fake_mciSendCommandA(MAGIC_DEVICEID, MCI_OPEN, 0, (DWORD_PTR)NULL);
 		return 0;
 	}
 
 	if (strstr(cmdbuf, "open cdaudio"))
 	{
-		fake_mciSendCommandA(MAGIC_DEVICEID, MCI_OPEN, 0, (DWORD_PTR)NULL);
+		// fake_mciSendCommandA(MAGIC_DEVICEID, MCI_OPEN, 0, (DWORD_PTR)NULL);
 		return 0;
 	}
 
@@ -829,6 +829,49 @@ MCIERROR WINAPI fake_mciSendStringA(LPCSTR cmd, LPSTR ret, UINT cchReturn, HANDL
 			notify = 1; /* storing the notify request */
 			window = (HWND)hwndCallback;
 		}
+		
+		// Handle time format (MM:SS:FF) - check these FIRST before integer formats
+		int from_min, from_sec, from_frame, to_min, to_sec, to_frame;
+		if (sscanf(cmdbuf, "play %*s from %d:%d:%d to %d:%d:%d", &from_min, &from_sec, &from_frame, &to_min, &to_sec, &to_frame) == 6)
+		{
+			if (time_format == MCI_FORMAT_MSF) {
+				parms.dwFrom = MCI_MAKE_MSF(from_min, from_sec, from_frame);
+				parms.dwTo = MCI_MAKE_MSF(to_min, to_sec, to_frame);
+			} else {
+				return MCIERR_UNSUPPORTED_FUNCTION;
+			}
+			
+			fake_mciSendCommandA(MAGIC_DEVICEID, MCI_PLAY, MCI_FROM|MCI_TO, (DWORD_PTR)&parms);
+			return 0;
+		}
+		
+		// Handle time format (MM:SS:FF) for from only
+		if (sscanf(cmdbuf, "play %*s from %d:%d:%d", &from_min, &from_sec, &from_frame) == 3)
+		{
+			if (time_format == MCI_FORMAT_MSF) {
+				parms.dwFrom = MCI_MAKE_MSF(from_min, from_sec, from_frame);
+			} else {
+				return MCIERR_UNSUPPORTED_FUNCTION;
+			}
+			
+			fake_mciSendCommandA(MAGIC_DEVICEID, MCI_PLAY, MCI_FROM, (DWORD_PTR)&parms);
+			return 0;
+		}
+		
+		// Handle time format (MM:SS:FF) for to only
+		if (sscanf(cmdbuf, "play %*s to %d:%d:%d", &to_min, &to_sec, &to_frame) == 3)
+		{
+			if (time_format == MCI_FORMAT_MSF) {
+				parms.dwTo = MCI_MAKE_MSF(to_min, to_sec, to_frame);
+			} else {
+				return MCIERR_UNSUPPORTED_FUNCTION;
+			}
+			
+			fake_mciSendCommandA(MAGIC_DEVICEID, MCI_PLAY, MCI_TO, (DWORD_PTR)&parms);
+			return 0;
+		}
+		
+		// Handle integer formats AFTER time formats
 		if (sscanf(cmdbuf, "play %*s from %d to %d", &from, &to) == 2)
 		{
 			parms.dwFrom = from;
