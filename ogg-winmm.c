@@ -19,18 +19,15 @@
 #include "player.h"
 #include "stub.h"
 
+#define INI_SECTION "OGG-WinMM"
+#define CDROM_IDENTIFIER "ogg-winmm virtual CD"
+#define MM_CREATIVE 2
+#define MM_CREATIVE_AUX_CD 401
 #define MAGIC_DEVICEID 0xCDDA
 #define MEDIA_IDENTITY "CDDA7777CDDA7777"
 #define MAX_TRACKS 99
 
-//#define _DEBUG
-
-#ifdef _DEBUG
-#define dprintf(...) if (fh) { fprintf(fh, __VA_ARGS__); fflush(NULL); }
-FILE *fh = NULL;
-#else
-#define dprintf(...)
-#endif
+#define dprintf(...) if (debug && fh) { fprintf(fh, __VA_ARGS__); fflush(NULL); }
 
 struct track_info
 {
@@ -52,14 +49,19 @@ struct track_info tracks[MAX_TRACKS+1]; // Track 0 is reserved.
 struct play_info info = {0};
 
 DWORD thread = 0; // Needed for Win95/98 compatibility
+FILE *fh = NULL;
 HANDLE player = NULL;
 HANDLE event = NULL;
 HWND window = NULL;
 const char alias_def[] = "cdaudio";
 char alias_s[100] = "cdaudio";
-char path[MAX_PATH];
-char cddaPath[MAX_PATH];
+char path[MAX_PATH] = {0};
+char cddaPath[MAX_PATH] = {0};
+char cddaFormat[MAX_PATH] = {0};
+char iniPath[MAX_PATH] = {0};
+char lengthOverride[16] = {0};
 
+int debug = 0;
 int mode = MCI_MODE_STOP;
 int command = 0;
 int notify = 0;
@@ -73,6 +75,17 @@ DWORD auxVol = -1; // HWORD: Right, LWORD: Left
 int cddaVol = 100;
 int midiVol = 100;
 int waveVol = 100;
+
+int GetLengthOverride(int track) {
+	char buf[16];
+	if (iniPath) {
+		sprintf(buf, "%u", track);
+		GetPrivateProfileString("LengthOverride", buf, NULL, lengthOverride, sizeof(lengthOverride), iniPath);
+		return 1;
+	}
+
+	return 0;
+}
 
 DWORD WINAPI player_main(void *unused)
 {
@@ -123,19 +136,19 @@ DWORD WINAPI player_main(void *unused)
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 {
 	if (fdwReason == DLL_PROCESS_ATTACH) {
-#ifdef _DEBUG
-		fh = fopen("winmm.log", "w");
-#endif
 		GetModuleFileName(hinstDLL, path, sizeof(path));
 
 		char *last = strrchr(path, '.');
 		if (last) {
 			strcpy(last, ".ini");
+			strcpy(iniPath, path);
 
-			GetPrivateProfileString("OGG-WinMM", "CDDAPath", "Music", cddaPath, MAX_PATH, path);
-			cddaVol = GetPrivateProfileInt("OGG-WinMM", "CDDAVolume", 100, path);
-			midiVol = GetPrivateProfileInt("OGG-WinMM", "MIDIVolume", 100, path);
-			waveVol = GetPrivateProfileInt("OGG-WinMM", "WAVEVolume", 100, path);
+			GetPrivateProfileString(INI_SECTION, "CDDAPath", "Music", cddaPath, sizeof(cddaPath), path);
+			GetPrivateProfileString(INI_SECTION, "CDDAFormat", "Track%02d.ogg", cddaFormat, sizeof(cddaFormat), path);
+			debug = GetPrivateProfileInt(INI_SECTION, "Debug", 0, path);
+			cddaVol = GetPrivateProfileInt(INI_SECTION, "CDDAVolume", 100, path);
+			midiVol = GetPrivateProfileInt(INI_SECTION, "MIDIVolume", 100, path);
+			waveVol = GetPrivateProfileInt(INI_SECTION, "WAVEVolume", 100, path);
 
 			if (cddaVol < 0 || cddaVol > 100 ) cddaVol = 100;
 			if (midiVol < 0 || midiVol > 100 ) midiVol = 100;
@@ -146,6 +159,9 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 			stub_wavevol(waveVol);
 		}
 
+		if (debug)
+			fh = fopen("winmm.log", "w");
+
 		last = strrchr(path, '\\');
 		if (last) *last = '\0';
 		strcat(path, "\\");
@@ -153,13 +169,16 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 
 		DWORD fa = GetFileAttributes(path);
 		if (fa != INVALID_FILE_ATTRIBUTES && fa & FILE_ATTRIBUTE_DIRECTORY) {
-			dprintf("ogg-winmm music directory is %s\n", path);
+			dprintf("Music directory: \"%s\", track format: \"%s\", CDDA volume: %d, MIDI volume: %d, WAVE volume: %d\n", path, cddaFormat, cddaVol, midiVol, waveVol);
 
 			memset(tracks, 0, sizeof(tracks));
 			unsigned int position = 0;
 
 			for (int i = 1; i <= MAX_TRACKS; i++) {
-				snprintf(tracks[i].path, MAX_PATH, "%s\\Track%02d.ogg", path, i);
+				static char buf[MAX_PATH];
+				snprintf(buf, MAX_PATH, cddaFormat, i);
+
+				snprintf(tracks[i].path, MAX_PATH, "%s\\%s", path, buf, i);
 				tracks[i].position = position;
 				tracks[i].length = plr_length(tracks[i].path);
 
@@ -173,7 +192,8 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 					tracks[i].path[0] = '\0';
 				}
 
-				if (numTracks && !tracks[i].length) break;
+				// Disable that as there are can be intentional gaps in tracks
+				// if (numTracks && !tracks[i].length) break;
 			}
 			dprintf("Emulating total of %d CD tracks.\n", numTracks);
 
@@ -184,13 +204,12 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 			}
 		}
 	} else if (fdwReason == DLL_PROCESS_DETACH) {
-#ifdef _DEBUG
 		if (fh)
 		{
 			fclose(fh);
 			fh = NULL;
 		}
-#endif
+
 		command = MCI_DELETE;
 		plr_stop();
 		if (event) SetEvent(event);
@@ -254,7 +273,7 @@ MCIERROR WINAPI fake_mciSendCommandA(MCIDEVICEID IDDevice, UINT uMsg, DWORD_PTR 
 			else return relay_mciSendCommandA(IDDevice, uMsg, fdwCommand, dwParam);
 		}
 		return relay_mciSendCommandA(IDDevice, uMsg, fdwCommand, dwParam);
-	} else if (IDDevice == MAGIC_DEVICEID || IDDevice == 0 || IDDevice == 0xFFFFFFFF) {
+	} else if (IDDevice == MAGIC_DEVICEID || IDDevice == 0 || IDDevice == 0xFFFFFFFF || IDDevice == 0x204) {
 		switch (uMsg) {
 			case MCI_CLOSE:
 				{
@@ -749,15 +768,32 @@ MCIERROR WINAPI fake_mciSendStringA(LPCSTR cmd, LPSTR ret, UINT cchReturn, HANDL
 			return 0;
 		}
 		int track = 0;
-		if (sscanf(cmdbuf, "status %*s length track %d", &track) == 1)
+		if (sscanf(cmdbuf, "status %*s length track %u", &track) == 1)
 		{
 			parms.dwItem = MCI_STATUS_LENGTH;
 			parms.dwTrack = track;
 			fake_mciSendCommandA(MAGIC_DEVICEID, MCI_STATUS, MCI_STATUS_ITEM|MCI_TRACK, (DWORD_PTR)&parms);
+			if (GetLengthOverride(track) && lengthOverride[0] != '\0') {
+				dprintf("Overridden track %u length with '%s'\n", track, lengthOverride);
+				strcpy(ret, lengthOverride);
+				return 0;
+			}
 			if (time_format == MCI_FORMAT_MILLISECONDS) {
 				sprintf(ret, "%d", parms.dwReturn);
 			} else {
-				sprintf(ret, "%02d:%02d:00", MCI_MSF_MINUTE(parms.dwReturn), MCI_MSF_SECOND(parms.dwReturn));
+				sprintf(ret, "%02u:%02u:%02u", MCI_MSF_MINUTE(parms.dwReturn), MCI_MSF_SECOND(parms.dwReturn), MCI_MSF_FRAME(parms.dwReturn));
+			}
+			return 0;
+		}
+		if (sscanf(cmdbuf, "status %*s type track %u", &track) == 1)
+		{
+			parms.dwItem = MCI_CDA_STATUS_TYPE_TRACK;
+			parms.dwTrack = track;
+			fake_mciSendCommandA(MAGIC_DEVICEID, MCI_STATUS, MCI_STATUS_ITEM|MCI_TRACK, (DWORD_PTR)&parms);
+			if (tracks[track].length) {
+				strcpy(ret, "audio");
+			} else {
+				strcpy(ret, "other");
 			}
 			return 0;
 		}
@@ -768,11 +804,11 @@ MCIERROR WINAPI fake_mciSendStringA(LPCSTR cmd, LPSTR ret, UINT cchReturn, HANDL
 			if (time_format == MCI_FORMAT_MILLISECONDS) {
 				sprintf(ret, "%d", parms.dwReturn);
 			} else {
-				sprintf(ret, "%02d:%02d:00", MCI_MSF_MINUTE(parms.dwReturn), MCI_MSF_SECOND(parms.dwReturn));
+				sprintf(ret, "%02u:%02u:%02u", MCI_MSF_MINUTE(parms.dwReturn), MCI_MSF_SECOND(parms.dwReturn), MCI_MSF_FRAME(parms.dwReturn));
 			}
 			return 0;
 		}
-		if (sscanf(cmdbuf, "status %*s position track %d", &track) == 1)
+		if (sscanf(cmdbuf, "status %*s position track %u", &track) == 1)
 		{
 			parms.dwItem = MCI_STATUS_POSITION;
 			parms.dwTrack = track;
@@ -787,13 +823,18 @@ MCIERROR WINAPI fake_mciSendStringA(LPCSTR cmd, LPSTR ret, UINT cchReturn, HANDL
 			if (time_format == MCI_FORMAT_MILLISECONDS) {
 				sprintf(ret, "%d", parms.dwReturn);
 			} else if (time_format == MCI_FORMAT_MSF) {
-				sprintf(ret, "%02d:%02d:%02d", MCI_MSF_MINUTE(parms.dwReturn), MCI_MSF_SECOND(parms.dwReturn), MCI_MSF_FRAME(parms.dwReturn));
+				sprintf(ret, "%02u:%02u:%02u", MCI_MSF_MINUTE(parms.dwReturn), MCI_MSF_SECOND(parms.dwReturn), MCI_MSF_FRAME(parms.dwReturn));
 			} else { /* TMSF */
-				sprintf(ret, "%02d:%02d:%02d:%02d", MCI_TMSF_TRACK(parms.dwReturn), MCI_TMSF_MINUTE(parms.dwReturn), MCI_TMSF_SECOND(parms.dwReturn), MCI_TMSF_FRAME(parms.dwReturn));
+				sprintf(ret, "%02u:%02u:%02u:%02u", MCI_TMSF_TRACK(parms.dwReturn), MCI_TMSF_MINUTE(parms.dwReturn), MCI_TMSF_SECOND(parms.dwReturn), MCI_TMSF_FRAME(parms.dwReturn));
 			}
 			return 0;
 		}
 		if (strstr(cmdbuf, "media present"))
+		{
+			strcpy(ret, "TRUE");
+			return 0;
+		}
+		if (strstr(cmdbuf, "ready"))
 		{
 			strcpy(ret, "TRUE");
 			return 0;
@@ -911,10 +952,10 @@ MMRESULT WINAPI fake_auxGetDevCapsA(UINT_PTR uDeviceID, LPAUXCAPS lpCaps, UINT c
 {
 	dprintf("fake_auxGetDevCapsA(uDeviceID=%08X, lpCaps=%p, cbCaps=%08X\n", uDeviceID, lpCaps, cbCaps);
 
-	lpCaps->wMid = 2 /*MM_CREATIVE*/;
-	lpCaps->wPid = 401 /*MM_CREATIVE_AUX_CD*/;
+	lpCaps->wMid = MM_CREATIVE;
+	lpCaps->wPid = MM_CREATIVE_AUX_CD;
 	lpCaps->vDriverVersion = 1;
-	strcpy(lpCaps->szPname, "ogg-winmm virtual CD");
+	strcpy(lpCaps->szPname, CDROM_IDENTIFIER);
 	lpCaps->wTechnology = AUXCAPS_CDAUDIO;
 	lpCaps->dwSupport = AUXCAPS_LRVOLUME | AUXCAPS_VOLUME;
 
